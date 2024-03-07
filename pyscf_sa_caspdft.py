@@ -5,20 +5,17 @@ To use this solver, one need to modify the dmet module to recognize the pyscf_ca
 Specifically:
 line 33: assert (( method == 'ED' ) or ( method == 'CC' ) or ( method == 'MP2' ) or ( method == 'CASSCF' ))
 line 257-261:
-elif ( self.metihod == 'CASPDFT' ):
-    import pyscf_caspdft
+elif ( self.metihod == 'SA-CASPDFT' ):
+    import pyscf_sacaspdft
     assert( Nelec_in_imp % 2 == 0 )
     DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
     IMP_energy, IMP_1RDM = pyscf_casscf.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, chempot_imp )
 
 History: 
 
-- the solver is tested under FCI limit. The energy agrees with the FCI energy by chemps2 solver.
-However, the energy is explosive when the active space decreasing. VERY negative! => SOLVED
+- the solver is tested under full-embedding limit. The energy agrees with the CAS-PDFT values from pyscf_forge.
 
-- Need to improve the efficiency => SOLVED
-
-author: Hung Pham (email: phamx494@umn.edu)
+Author: Shreya Verma (email: shreyav@uchicago.edu)
 '''
 
 import numpy as np
