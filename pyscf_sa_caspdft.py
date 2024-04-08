@@ -25,6 +25,7 @@ import numpy as np
 import localintegrals
 import os, time
 from pyscf.lib import logger
+from functools import reduce
 import sys
 import qcdmet_paths
 from pyscf import gto, scf, ao2mo, mcscf, fci, mrpt, lib
@@ -34,7 +35,7 @@ from pyscf.mcpdft.otfnal import otfnal, transfnal, ftransfnal
 from pyscf.mcpdft import _dms
 #np.set_printoptions(threshold=np.nan)
 
-def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list, DMguessRHF, loc2dmet, ao2eo, ao2eo_act, OneRDM_full_loc, mol_from_localizer, energytype='CASCI', chempot_imp=0.0, state_specific_=None, state_average_=None, state_average_mix_=None, nevpt2_roots=None, nevpt2_nroots=10, nevpt2_spin=0.0, printoutput=True ):
+def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list, DMguessRHF, loc2dmet, ao2eo, ao2eo_act, OneRDM_full_loc, mol_from_localizer, energytype='CASCI', chempot_imp=0.0, state_specific_=None, state_average_=None, chkfilesave = None,chkfileread = None, state_average_mix_=None, nevpt2_roots=None, nevpt2_nroots=10, nevpt2_spin=0.0, printoutput=True ):
     '''
         CASPDFT with FCI solver:
             - Ground state
@@ -95,14 +96,14 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
     
     mc = mcscf.CASSCF(mf, CASorb, CASe)
     mc.fix_spin_(ss=fix_spin_val)
-    #mc.chkfile = '/project/lgagliardi/shreyav/moldmet/fep-im/basis-ccpvqz/quintet/sa-dmet/fep-im-q.chk'
-    #mc.conv_tol = 1e-10
+    #mc.chkfile = '/project/lgagliardi/shreyav/moldmet/fe-large/dmet/timing/frags/imp0/q/fe-q.chk'
+    #mc.chkfile = '/project/lgagliardi/shreyav/moldmet/ni-large/charged/dmet/frags/imp0/t-85.chk'
+    #mc.chkfile = '/project/lgagliardi/shreyav/moldmet/fep-im/cas65/dmet/bath-15/s/qfors.chk'
+    mc.chkfile = chkfilesave
+    mc.conv_tol = 1e-9
     mc.max_cycle = 5000
     #mc.verbose = 3
     mc.natorb = True
-
-    #MC-PDFT 
-    #pdftmc = mcpdft.CASSCF (mf, 'tPBE', 2, 2, grids_level=3)
 
     #state-specific or state-average details
     print ("SV state_specific_ = ", state_specific_)
@@ -120,7 +121,7 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
             print ("SV no FakeCISolver")
     elif state_average_mix_ is not None:
         solver1, solver2, weights_sa = state_average_mix_
-        mcscf.state_average_mix_(self.mc, [solver1, solver2], weights_sa)
+        mcscf.state_average_mix_(mc, [solver1, solver2], weights_sa)
     else:
         state_id = 0
         nroots = 1
@@ -130,19 +131,32 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
     ncorelec = mol.nelectron - (mc.nelecas[0] + mc.nelecas[1])
     mc.ncore = ncorelec //2
 
-    if cas_list is not None: 
+    if cas_list is not None:
         print('Impurity active space selection:', cas_list)
-        mo = lib.chkfile.load('/project/lgagliardi/shreyav/moldmet/fep-im/basis-ccpvqz/singlet/3/fep-im-qfors-1012.chk', 'mcscf/mo_coeff')
-        #mo = mc.sort_mo(cas_list)
-        E_CASSCF, E_CAS, fcivec = mc.kernel(mo)[:3]
+        if chkfileread is not None:
+            mo = lib.chkfile.load(chkfileread,'mcscf/mo_coeff')
+            mo1 = mc.sort_mo(cas_list,mo_coeff=mo)
+        #print ("Starting CASSCF kernel: ", time.time())
+            E_CASSCF, E_CAS, fcivec = mc.kernel(mo1)[:3]
+        #print ("Ending CASSCF kernel: ", time.time())
+        else:
+            mo = mc.sort_mo(cas_list)
+            E_CASSCF, E_CAS, fcivec = mc.kernel(mo)[:3]
+
     else:
-        E_CASSCF, E_CAS, fcivec = mc.kernel()[:3]   # same as line 1046 in pdmet by Hung
-        #E_CASSCF = mc.kernel()[0]
+        #mo = lib.chkfile.load('/project/lgagliardi/shreyav/moldmet/fe-large/dmet/timing/frags/imp0/q/fe-q.chk','mcscf/mo_coeff')
+        #mo = lib.chkfile.load('/project/lgagliardi/shreyav/moldmet/ni-large/charged/dmet/t/t-85.chk','mcscf/mo_coeff')
+        if chkfileread is not None:
+            mo = lib.chkfile.load(chkfileread,'mcscf/mo_coeff')
+            E_CASSCF, E_CAS, fcivec = mc.kernel(mo)[:3]
+        else:
+            E_CASSCF, E_CAS, fcivec = mc.kernel()[:3]
 
     MO = mc.mo_coeff # save the MO coefficient and this corresponds to line 1053
+    print ("SV MO = ", MO)
     MOnat = mc.cas_natorb()[0] 
     OccNum = mc.cas_natorb()[2]	
-    print('Dimension:', MO.shape[0] )	
+    #print('Dimension:', MO.shape[0] )	
     print('Impurity active space: ', CASe, 'electrons in ', CASorb, ' orbitals')	
     print('Impurity CASSCF energy: ', E_CASSCF)	
     
@@ -221,13 +235,14 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
         OneRDM_full_dmet [:num_act_orbs,:num_act_orbs] = OneRDM [:,:]
         RDM1sa_full_dmet [:num_act_orbs,:num_act_orbs] = RDM1sa [:,:]
         RDM1sb_full_dmet [:num_act_orbs,:num_act_orbs] = RDM1sb [:,:]
+        print ("SV OneRDM_full_dmet = ", OneRDM_full_dmet.shape)
 
     
         OneRDM_full_ao = np.dot(np.dot(ao2dmet, OneRDM_full_dmet), ao2dmet.conj().T)
         RDM1sa_full_ao = np.dot(np.dot(ao2dmet, RDM1sa_full_dmet), ao2dmet.conj().T)
         RDM1sb_full_ao = np.dot(np.dot(ao2dmet, RDM1sb_full_dmet), ao2dmet.conj().T)
         RDM1s_full_ao = [RDM1sa_full_ao, RDM1sb_full_ao]
-        print ("SV new 1RDM: ", OneRDM_full_ao)
+        #print ("SV new 1RDM: ", OneRDM_full_ao)
    # RDM1s_ao is not the imp block replaced ones 
         RDM1sa_ao = np.dot(np.dot(ao2dmet_active, RDM1sa), ao2dmet_active.T)
         RDM1sb_ao = np.dot(np.dot(ao2dmet_active, RDM1sb), ao2dmet_active.T)
@@ -235,6 +250,8 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
 
     # Transforming mo_coeff needs ao2loc and loc2dmet but only its active part
         mo_coeff_dmet = np.dot(ao2dmet_active, mc.mo_coeff [:,mc.ncore:mc.ncore+mc.ncas])
+        #print ("SV mo_coeff_dmet = ", mo_coeff_dmet)#reduce(np.dot,(loc2dmet, MO, loc2dmet.T)))
+        #print ("SV mo_coeff_ao = ", np.dot(mo_coeff_dmet,ao2dmet_active.T))
         ImpurityEnergy = E_CASSCF[i]
         print('       State %d (%5.3f): E(Solver) = %12.8f  E(Imp) = %12.8f  <S^2> = %8.6f' % (i, weights_sa[i], E_CASSCF[i], ImpurityEnergy, SS))
         tot_SS += SS
@@ -242,12 +259,14 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
         e_mol.append(ImpurityEnergy)
 
         # Calling the MC-PDFT functions
+        print ("Entering PDFT part of DME-PDFT: ", time.time())
         e_pdft = get_dmet_pdft (mc, OneRDM, 'tPBE', casdm1_mo, casdm2_mo, casdm1s_mo_fromab, RDM1s_full_ao, rdm1spin_sep_a[i], rdm1spin_sep_b[i], mol_from_localizer, OneRDM_full_ao, ao2dmet, ao2dmet_active, mo_coeff_dmet, scf.RHF(mol_from_localizer), weights_sa, i)
+        print ("Exiting PDFT part of DME-PDFT: ", time.time())
         print ("The MC-PDFT energy of State ", i, " is: ", e_pdft)
 
     RDM1 = lib.einsum('i,ijk->jk',state_average_, RDM1)
     e_mol = lib.einsum('i,i->',state_average_, e_mol)
-    print ("E_CASSCF before NEVPT2: ", E_CASSCF)
+    #print ("E_CASSCF before NEVPT2: ", E_CASSCF)
 
     # Implementing NEVPT2 solver with CASSCF
 
@@ -257,14 +276,18 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
         neleca = CASe - nelecb
         nelecas = (neleca, nelecb)
         mc_CASCI = mcscf.CASCI(mf, CASorb, CASe)
-        print ("fix_spin_val: ", fix_spin_val)
+        #print ("fix_spin_val: ", fix_spin_val)
         mc_CASCI = mc_CASCI.fix_spin_(ss=fix_spin_val)
-        mc_CASCI.conv_tol = 1e-10
         mc_CASCI.fcisolver.nroots = nevpt2_nroots
-        #mc_CASCI.max_memory = 900
+        print ("Starting CASCI/NEVPT2 kernel: ", time.time())
         fcivec = mc_CASCI.kernel(mc.mo_coeff)[2]
+        #t_dm1 = mc_CASCI.fcisolver.trans_rdm1(fcivec[0], fcivec[1], CASe, CASorb)
+        print ("Ending CASCI/NEVPT2 kernel: ", time.time())
         ground_state = fcivec[0]
-
+        #print ("Ground state in dmet basis = ", reduce(np.dot, (, ground_state)))
+        #gs_dmet = reduce(np.dot, (mocas, ground_state, mocas.T))
+        #print ("Ground state in ao basis = ", reduce(np.dot,(ao2dmet_active,gs_dmet , ao2dmet_active.conj().T)))
+        #t_dm1 = mc_CASCI.fcisolver.trans_rdm1(ground_state, fcivec[1], CASe, CASorb)
         # Run NEVPT2
         e_casci_nevpt = []
         t_dm1s = []
@@ -273,8 +296,18 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
         if len(nevpt2_roots) > len(fcivec): nevpt2_roots = np.arange(len(fcivec))
         for root in nevpt2_roots:
             ci = fcivec[root]
+            #print ("SV mc_casci.ci = ",ci)
+            #t_dm1 = mc_CASCI.fcisolver.trans_rdm1(ground_state, ci, CASe, CASorb)
+            #t_dm1_dmet = reduce(np.dot, (mocas, t_dm1, mocas.T))
+            #t_dm1_ao = reduce(np.dot,(ao2dmet_active, t_dm1_dmet, ao2dmet_active.conj().T))
+            #print ("SV t_dm1, t_dm1_dmet = ", t_dm1.shape, t_dm1_dmet.shape, t_dm1_ao)
+            #t_dm1_ao_dip = np.einsum('xij,ji->x', get_dip_ints(mol_from_localizer), t_dm1_ao)
+            print ("SV dip_ints = ", get_dip_ints(mol_from_localizer))
+            #print ('Transition dipole between |0> and |%d>'%(root), t_dm1_ao_dip)
             SS = mc_CASCI.fcisolver.spin_square(ci, CASorb, CASe)[0]
+            print ("Starting NEVPT2 kernel at: ", time.time(),"for root ", root)
             e_corr = mrpt.NEVPT(mc_CASCI, root).kernel()
+            print ("Ending NEVPT2: ", time.time())
             if not isinstance(mc_CASCI.e_tot, np.ndarray):
                 e_CASCI = mc_CASCI.e_tot
                 e_nevpt = e_CASCI + e_corr
@@ -327,6 +360,14 @@ def solve(CONST, OEI, FOCK, TEI, Norb, Nel, Nimp, impCAS, fix_spin_val, cas_list
     #print ("e_casci_nevpt: ", e_casci_nevpt)
 
     return ( e_mol, E_CASSCF, RDM1, MOmf, MO, MOnat, OccNum)
+
+def get_dip_ints(mol_from_localizer):
+    charges = mol_from_localizer.atom_charges()
+    coords = mol_from_localizer.atom_coords()
+    nuc_charge_center = np.einsum('z,zx->x', charges, coords) / charges.sum()
+    mol_from_localizer.set_common_orig_(nuc_charge_center)
+    dip_ints = mol_from_localizer.intor('cint1e_r_sph', comp=3)
+    return dip_ints
 
 def get_dmet_pdft (dmetmc, OneRDM, my_ot, casdm1, casdm2, casdm1s, RDM1s_ao, rdm1spin_sep_a, rdm1spin_sep_b, mol_full, OneRDM_fao, ao2dmet, ao2dmet_active, mo_coeff_dmet, my_mf, weights_sa, root, cipass=None, dmet_pdft_roots=10, dmet_pdft_spin=0.0):
 
@@ -425,6 +466,7 @@ def MCPDFT (mc, rdm1, ot, casdm1, casdm2, casdm1s, RDM1s_ao, rdm1spin_sep_a, rdm
     print ("Te_Vne: ",Te_Vne)
     print ("E_j: ",E_j)
     print ("E_x: ",E_x)
+    print ("E_c: ",E_c)
     print ("E_ot: ",E_ot)
     print ("E_tot: ", E_tot)
     
