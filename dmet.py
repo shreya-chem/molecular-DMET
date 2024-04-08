@@ -69,6 +69,8 @@ class dmet:
         self.nevpt2_spin = nevpt2_spin
         self.state_specific_ = None
         self.state_average_ = None
+        self.chkfilesave = None
+        self.chkfileread = None
         self.state_average_mix_  = None
         self.nroots = 10
 
@@ -330,8 +332,10 @@ class dmet:
                 assert( Nelec_in_imp % 2 == 0 )
                 DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
                 ao2dmet, ao2dmet_active = self.ints.get_ao2dmet(loc2dmet, Norb_in_imp)
-                IMP_energy, E_casscf, IMP_1RDM, MOmf, MO, MOnat, OccNum = pyscf_sa_caspdft.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.fix_spin_val, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, state_average_=self.state_average_, state_average_mix_=self.state_average_mix_, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
-
+                start_time = time.time()
+                IMP_energy, E_casscf, IMP_1RDM, MOmf, MO, MOnat, OccNum = pyscf_sa_caspdft.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.fix_spin_val, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, state_average_=self.state_average_, chkfilesave = self.chkfilesave,chkfileread = self.chkfileread,state_average_mix_=self.state_average_mix_, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
+                end_time = time.time()
+                print ("Time taken for SA-CASPDFT calculation after bath construction = ", (end_time - start_time))
                 self.MOmf = MOmf
                 self.MO = MO    #the MO is updated eveytime the CASSCF solver called
                 self.MOnat = MOnat
@@ -353,6 +357,7 @@ class dmet:
                 self.OccNum = OccNum
                 self.IMP_1RDM = IMP_1RDM
                 self.IMP_1RDM_corr_AO = IMP_1RDM_corr_AO
+                print ("SV IMP_energy = ",IMP_energy)
 
             elif (self.method == 'CASCI-PDFT'):
                 import pyscf_casci
@@ -405,6 +410,7 @@ class dmet:
                 e_CASCI = e_CASCI_NEVPT2[:,1]
                 e_NEVPT2 = e_CASCI_NEVPT2[:,2]
                 self.energy += e_CAS
+                print ("SV self.energy = ", self.energy)
                 #print ("SV e_CASCI_NEVPT2: ", e_CASCI_NEVPT2)
                 #print ("SV energies check: ",e_CAS, e_NEVPT2)
                 self.e_casci_tot = np.asarray(e_CASCI)
@@ -413,6 +419,7 @@ class dmet:
             # Done adding NEVPT2
             else:
                 self.energy += IMP_energy
+                print ("SV self.energy = ", self.energy)
 
             E_frag.append(IMP_energy)
             self.imp_1RDM.append( IMP_1RDM )
@@ -455,9 +462,9 @@ class dmet:
             for i, e_nevpt2 in enumerate(self.e_nept2_tot):
                 E_nevpt2_total = e_nevpt2+self.ints.const()
                 print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], self.e_casci_tot[i], E_nevpt2_total, self.ss_CASCI[i]))
-            for i, e_casci in enumerate(self.e_casci_tot):
-                E_casci_total = e_casci + self.ints.const()
-                print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], E_casci_total, E_nevpt2_total, self.ss_CASCI[i]))
+#            for i, e_casci in enumerate(self.e_casci_tot):
+#                E_casci_total = e_casci + self.ints.const()
+#                print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], E_casci_total, E_nevpt2_total, self.ss_CASCI[i]))
 
 
         # When an incomplete impurity tiling is used for the Hamiltonian, self.energy should be augmented with the remaining HF part
@@ -910,7 +917,7 @@ class dmet:
     
     def print_1rdm( self ):
     
-        print ("The ED 1-RDM of the impurities ( + baths ) =")
+        #print ("The ED 1-RDM of the impurities ( + baths ) =")
         for count in range( len( self.imp_size ) ): # self.imp_size has length 1 if self.TransInv
             print (self.imp_1RDM[ count ])
             
