@@ -25,12 +25,12 @@ import time
 
 class dmet:
 
-    def __init__( self, theInts, impurityClusters, isTranslationInvariant, method='ED', SCmethod='LSTSQ', fitImpBath=True, use_constrained_opt=False ):
+    def __init__( self, theInts, impurityClusters, isTranslationInvariant, method='ED', SCmethod='LSTSQ', fitImpBath=True, use_constrained_opt=False, doDET=False,doDET_NO=False, state_average_mix_=None, nevpt2_spin=None ):
     
         if ( isTranslationInvariant == True ):
             assert( theInts.TI_OK == True )
         
-        assert (( method == 'ED' ) or ( method == 'CC' ) or ( method == 'MP2' ))
+        assert (( method == 'ED' ) or ( method == 'CC' ) or ( method == 'MP2' ) or ( method == 'CASSCF' ) or ( method == 'RHF' ) or ( method == 'SA-CASSCF' ) or ( method == 'SS-CASSCF' ) or ( method == 'CASPDFT' ) or ( method == 'SS-CASPDFT' ) or ( method == 'SA-CASPDFT' ) or ( method == 'CASCI-PDFT' ))
         assert (( SCmethod == 'LSTSQ' ) or ( SCmethod == 'BFGS' ) or ( SCmethod == 'NONE' ))
         
         self.ints       = theInts
@@ -44,14 +44,57 @@ class dmet:
         self.doSCF      = False
         self.TransInv   = isTranslationInvariant
         self.SCmethod   = SCmethod
-        self.CC_E_TYPE  = 'LAMBDA' #'CASCI'
+        self.CC_E_TYPE  = 'LAMBDA' #'CASCI'/'LAMBDA'
         self.BATH_ORBS  = None
         self.fitImpBath = fitImpBath
-        self.doDET      = False
-        self.doDET_NO   = False
+        self.doDET      = doDET
+        self.doDET_NO   = doDET_NO
         self.NOrotation = None
         self.altcostfunc = use_constrained_opt
 
+        #HP: Define impurity CAS space 
+        self.impCAS = (2,2)  #default
+        self.fix_spin_val = 0 #default
+        self.nalpha = 1
+        self.nbeta = 1
+        self.CASlist = None  #default
+        self.MOmf = None
+        self.MO = None
+        self.MOnat = None		
+        self.ao2loc = self.ints.ao2loc    #transform AO to LOC		
+        self.loc2dmet = None  #transform LOC to DMET, only imp + bath will be stored
+        self.nevpt2_nroots = 10
+        self.bath_threshold = 1e-13
+        self.nevpt2_roots = None
+        self.nevpt2_spin = nevpt2_spin
+        self.state_specific_ = None
+        self.state_average_ = None
+        self.chkfilesave = None
+        self.chkfileread = None
+        self.state_average_mix_ = None
+        self.nroots = 10
+
+        self.OccNum = None
+        self.twoS = None
+
+        if self.method in [ 'SS-CASSCF', 'SS-CASPDFT', 'CASPDFT', 'CASCI-PDFT']:
+            self.state_specific_ = 0
+        elif self.method in ['SA-CASSCF', 'SA-CASPDFT', 'CASPDFT', 'CASCI-PDFT']:
+            if state_average_mix_ is None:
+                self.state_average_ = [1/4]*4
+            else:
+                self.state_average_mix_ = state_average_mix_
+
+        if self.nevpt2_spin is None:
+            self.nevpt2_spin = self.twoS
+
+        if self.twoS is None:
+            self.twoS = self.ints.mol.spin
+        print ("SV twoS= ", self.twoS)
+
+        #HP: use UHF solver
+        self.UHF = False
+		
         self.minFunc    = None
         if self.altcostfunc:
             self.minFunc = 'FOCK_INIT'  # 'OEI'
@@ -61,7 +104,15 @@ class dmet:
         
         if (( self.method == 'CC' ) and ( self.CC_E_TYPE == 'CASCI' )):
             assert( len( self.impClust ) == 1 )
-        
+
+        #HP: debugging CASCI method
+        if (( self.method == 'RHF' ) and ( self.CC_E_TYPE == 'CASCI' )):
+            assert( len( self.impClust ) == 1 ) 
+			
+        #HP: modified for CASSCF solver			
+        if (( self.method == 'CASSCF' ) and ( self.CC_E_TYPE == 'CASCI' )):
+            assert( len( self.impClust ) == 1 ) 
+			
         if ( self.doDET == True ):
             # Cfr Bulik, PRB 89, 035140 (2014)
             self.fitImpBath = False
@@ -75,7 +126,7 @@ class dmet:
         allOne = self.testclusters()
         if ( allOne == False ): # One or more impurities which do not cover the entire system
             assert( self.TransInv == False ) # Make sure that you don't work translational invariant
-            # Note on working with impurities which do no tile the entire system: they should be the first orbitals in the Hamiltonian!
+            # Note on working with impurities which do not tile the entire system: they should be the first orbitals in the Hamiltonian!
         
         self.energy   = 0.0
         self.imp_1RDM = []
@@ -101,18 +152,22 @@ class dmet:
         assert( np.all( quicktest <= 1 ) )
         allOne = np.all( quicktest == 1 )
         return allOne
-            
+   
     def make_imp_size( self ):
     
         thearray = []
+        print ("SV: impClust", self.impClust, "and its length: ", len(self.impClust))
         maxiter = len( self.impClust )
         if ( self.TransInv == True ):
             maxiter = 1
+            print("SV: Entering TransInv")
         for counter in range( maxiter ):
             impurityOrbs = np.abs(self.impClust[ counter ])
+            print("SV impurityOrbs: ", impurityOrbs)
             numImpOrbs = np.sum( impurityOrbs )
             thearray.append( numImpOrbs )
         thearray = np.array( thearray )
+        #print ("SV thearray (stores the total number of impurity orbitals taken in that fragment): ",thearray)
         return thearray
 
     def makelist_H1( self ):
@@ -123,7 +178,7 @@ class dmet:
                 localsize = self.imp_size[ 0 ]
                 for row in range( localsize ):
                     H1 = np.zeros( [ self.Norb, self.Norb ], dtype=int )
-                    for jumper in range( self.Norb / localsize ):
+                    for jumper in range( self.Norb // localsize ):
                         jumpsquare = localsize * jumper
                         H1[ jumpsquare + row, jumpsquare + row ] = 1
                     theH1.append( H1 )
@@ -135,17 +190,19 @@ class dmet:
                         H1[ jumpsquare + row, jumpsquare + row ] = 1
                         theH1.append( H1 )
                     jumpsquare += localsize
+                    #print("SV theH1: ", theH1)
         else: # Do density MATRIX embedding theory
             if ( self.TransInv == True ): # Translational invariance assumed
                 localsize = self.imp_size[ 0 ]
                 for row in range( localsize ):
                     for col in range( row, localsize ):
                         H1 = np.zeros( [ self.Norb, self.Norb ], dtype=int )
-                        for jumper in range( self.Norb / localsize ):
+                        for jumper in range( self.Norb // localsize ):
                             jumpsquare = localsize * jumper
                             H1[ jumpsquare + row, jumpsquare + col ] = 1
                             H1[ jumpsquare + col, jumpsquare + row ] = 1
                         theH1.append( H1 )
+                        #print("SV theH1: ", theH1)
             else: # NO translational invariance assumed
                 jumpsquare = 0
                 for localsize in self.imp_size:
@@ -176,10 +233,10 @@ class dmet:
                 jump += localsize
         return themask
         
-    def doexact( self, chempot_imp=0.0 ):
-    
-        OneRDM = self.helper.construct1RDM_loc( self.doSCF, self.umat )
-        self.energy   = 0.0
+    def doexact( self, chempot_imp=0.0 ):  
+        OneRDM = self.helper.construct1RDM_loc( self.doSCF, self.umat ) #HP: construct 1rdm (in AO) for the total system from the Fock matrix in local ao basis. projected on atoms? Looks like projected because it's constructed only for numPairs!
+        #print("SV OneRDM in lo basis: ", OneRDM)
+        self.energy   = 0.0												#This OneRDM will be used to construct the bath
         self.imp_1RDM = []
         self.dmetOrbs = []
         if ( self.doDET == True ) and ( self.doDET_NO == True ):
@@ -191,18 +248,28 @@ class dmet:
             maxiter = 1
             
         remainingOrbs = np.ones( [ len( self.impClust[ 0 ] ) ], dtype=float )
-        
+
+        E_frag = [] #HP: to export fragment energies
         for counter in range( maxiter ):
         
-            flag_rhf = np.sum(self.impClust[ counter ]) < 0
+            flag_rhf = np.sum(self.impClust[ counter ]) < 0 # the elements of self.impClust can be diffent to 1 and negative? probably when casci_energy_formula is False
             impurityOrbs = np.abs(self.impClust[ counter ])
+            #print ("SV impurityOrbs to be passed to constructbath: ", impurityOrbs)
             numImpOrbs   = np.sum( impurityOrbs )
-            if ( self.BATH_ORBS == None ):
-                numBathOrbs = numImpOrbs
-            else:
+            print ("SV self.BATH_ORBS = ", self.BATH_ORBS)
+            if (self.BATH_ORBS is not None and self.BATH_ORBS[ counter ] != 0):
                 numBathOrbs = self.BATH_ORBS[ counter ]
-            numBathOrbs, loc2dmet, core1RDM_dmet = self.helper.constructbath( OneRDM, impurityOrbs, numBathOrbs )
-            if ( self.BATH_ORBS == None ):
+                print ("SV numBathOrbs per bond condition = ", numBathOrbs)
+            else:
+                numBathOrbs = numImpOrbs # SV number of bath orbs = impurity orbs
+				
+            numBathOrbs, loc2dmet, core1RDM_dmet = self.helper.constructbath( OneRDM, impurityOrbs, numBathOrbs, threshold=self.bath_threshold)
+            print("SV numBathOrbs: ", numBathOrbs)
+            self.numBathOrbs = numBathOrbs
+
+            #print ("SV loc2dmet: ", loc2dmet)
+            
+            if ( self.BATH_ORBS is None ): #SV what is core_cutoff
                 core_cutoff = 0.01
             else:
                 core_cutoff = 0.5
@@ -212,14 +279,16 @@ class dmet:
                 elif ( core1RDM_dmet[ cnt ] > 2.0 - core_cutoff ):
                     core1RDM_dmet[ cnt ] = 2.0
                 else:
-                    print "Bad DMET bath orbital selection: trying to put a bath orbital with occupation", core1RDM_dmet[ cnt ], "into the environment :-(."
+                    print ("Bad DMET bath orbital selection: trying to put a bath orbital with occupation", core1RDM_dmet[ cnt ], "into the environment :-(.")
                     assert( 0 == 1 )
 
-            Norb_in_imp  = numImpOrbs + numBathOrbs
+            Norb_in_imp  = numImpOrbs + numBathOrbs # seems like Nemb in the schmidtbasis by Hung
             Nelec_in_imp = int(round(self.ints.Nelec - np.sum( core1RDM_dmet )))
-            core1RDM_loc = np.dot( np.dot( loc2dmet, np.diag( core1RDM_dmet ) ), loc2dmet.T )
-            
+            print ("SV Nelec_in_imp: ", Nelec_in_imp)
+            core1RDM_loc = np.dot( np.dot( loc2dmet, np.diag( core1RDM_dmet ) ), loc2dmet.T )   		    
+            #print("SV core1RDM_loc 1: ", core1RDM_loc, "and Norb_in_imp: ", Norb_in_imp)
             self.dmetOrbs.append( loc2dmet[ :, :Norb_in_imp ] ) # Impurity and bath orbitals only
+            print("SV dmetOrbs: ",self.dmetOrbs)
             assert( Norb_in_imp <= self.Norb )
             dmetOEI  = self.ints.dmet_oei(  loc2dmet, Norb_in_imp )
             dmetFOCK = self.ints.dmet_fock( loc2dmet, Norb_in_imp, core1RDM_loc )
@@ -236,25 +305,126 @@ class dmet:
                 dmetOEI += umat_rotated[:Norb_in_imp,:Norb_in_imp]
                 dmetFOCK = np.array( dmetOEI, copy=True )
             
-            print "DMET::exact : Performing a (", Norb_in_imp, "orb,", Nelec_in_imp, "el ) DMET active space calculation."
+            print ("DMET::exact : Performing a (", Norb_in_imp, "orb,", Nelec_in_imp, "el ) DMET active space calculation.")
             if ( flag_rhf ):
+                print("SV flag_rhf: ",flag_rhf)
                 import pyscf_rhf
-                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp/2, numImpOrbs, chempot_imp )
-                IMP_energy, IMP_1RDM = pyscf_rhf.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, chempot_imp )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                IMP_energy, IMP_1RDM = pyscf_rhf.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, chempot_imp)#self.CC_E_TYPE, chempot_imp )
+            elif ( flag_rhf and self.UHF == True):
+                import pyscf_uhf
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                IMP_energy, IMP_1RDM = pyscf_uhf.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, chempot_imp )				
             elif ( self.method == 'ED' ):
                 import chemps2
                 IMP_energy, IMP_1RDM = chemps2.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, chempot_imp )
             elif ( self.method == 'CC' ):
                 import pyscf_cc
                 assert( Nelec_in_imp % 2 == 0 )
-                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp/2, numImpOrbs, chempot_imp )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
                 IMP_energy, IMP_1RDM = pyscf_cc.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, self.CC_E_TYPE, chempot_imp )
             elif ( self.method == 'MP2' ):
                 import pyscf_mp2
                 assert( Nelec_in_imp % 2 == 0 )
-                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp/2, numImpOrbs, chempot_imp )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
                 IMP_energy, IMP_1RDM = pyscf_mp2.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, chempot_imp )
-            self.energy += IMP_energy
+
+            elif (self.method == 'SA-CASPDFT'):
+                import pyscf_sa_caspdft
+                #import dmepdft_from_forge
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                ao2dmet, ao2dmet_active = self.ints.get_ao2dmet(loc2dmet, Norb_in_imp)
+                start_time = time.time()
+                IMP_energy, E_casscf, IMP_1RDM, MOmf, MO, MOnat, OccNum = pyscf_sa_caspdft.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.fix_spin_val, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, state_average_=self.state_average_, chkfilesave = self.chkfilesave,chkfileread = self.chkfileread,state_average_mix_=self.state_average_mix_, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
+                end_time = time.time()
+                print ("Time taken for SA-CASPDFT calculation after bath construction = ", (end_time - start_time))
+                self.MOmf = MOmf
+                self.MO = MO    #the MO is updated eveytime the CASSCF solver called
+                self.MOnat = MOnat
+                self.loc2dmet = loc2dmet        #similar to MO          [:,:Norb_in_imp]
+                self.OccNum = OccNum
+                print ("SV IMP_energy: ", IMP_energy)
+                print ("SV E_casscf: ", E_casscf)
+            elif (self.method == 'CASPDFT'):
+                import pyscf_caspdft
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                ao2dmet, ao2dmet_active = self.ints.get_ao2dmet(loc2dmet, Norb_in_imp)
+                IMP_energy, E_casscf, PDFT_energy, IMP_1RDM, IMP_1RDM_corr_AO, MOmf, MO, MOnat, OccNum = pyscf_caspdft.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
+
+                self.MOmf = MOmf
+                self.MO = MO    #the MO is updated eveytime the CASSCF solver called
+                self.MOnat = MOnat
+                self.loc2dmet = loc2dmet        #similar to MO          [:,:Norb_in_imp]
+                self.OccNum = OccNum
+                self.IMP_1RDM = IMP_1RDM
+                self.IMP_1RDM_corr_AO = IMP_1RDM_corr_AO
+                print ("SV IMP_energy = ",IMP_energy)
+
+            elif (self.method == 'CASCI-PDFT'):
+                import pyscf_casci
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                ao2dmet, ao2dmet_active = self.ints.get_ao2dmet(loc2dmet, Norb_in_imp)
+                IMP_energy, E_casscf, PDFT_energy, IMP_1RDM, IMP_1RDM_corr_AO, MOmf, MO, MOnat, OccNum = pyscf_casci.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.fix_spin_val, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, state_specific_=self.state_specific_, chkfilesave = self.chkfilesave,chkfileread = self.chkfileread, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
+                self.MOmf = MOmf
+                self.MO = MO    #the MO is updated eveytime the CASSCF solver called
+                self.MOnat = MOnat
+                self.loc2dmet = loc2dmet        #similar to MO          [:,:Norb_in_imp]
+                self.OccNum = OccNum
+                self.IMP_1RDM = IMP_1RDM
+                self.IMP_1RDM_corr_AO = IMP_1RDM_corr_AO
+
+            elif (self.method == 'SS-CASPDFT'):
+                import pyscf_ss_caspdft
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                ao2dmet, ao2dmet_active = self.ints.get_ao2dmet(loc2dmet, Norb_in_imp)
+                IMP_energy, E_casscf, PDFT_energy, IMP_1RDM, IMP_1RDM_corr_AO, MOmf, MO, MOnat, OccNum = pyscf_ss_caspdft.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.fix_spin_val, self.nalpha, self.nbeta, self.CASlist, DMguessRHF, loc2dmet, ao2dmet, ao2dmet_active, OneRDM, self.ints.mol, self.CC_E_TYPE, chempot_imp, chkfilesave = self.chkfilesave,chkfileread = self.chkfileread, state_specific_=self.state_specific_, nevpt2_roots=self.nevpt2_roots, nevpt2_nroots= self.nevpt2_nroots, nevpt2_spin=0)
+                self.MOmf = MOmf
+                self.MO = MO    #the MO is updated eveytime the CASSCF solver called
+                self.MOnat = MOnat
+                self.loc2dmet = loc2dmet        #similar to MO          [:,:Norb_in_imp]
+                self.OccNum = OccNum
+
+            elif ( self.method == 'CASSCF' ):
+                import pyscf_casscf
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                IMP_energy, IMP_1RDM, MOmf, MO, MOnat, OccNum = pyscf_casscf.solve(0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, self.impCAS, self.CASlist, DMguessRHF, self.CC_E_TYPE, chempot_imp )
+                
+                self.MOmf = MOmf
+                self.MO = MO	#the MO is updated eveytime the CASSCF solver called
+                self.MOnat = MOnat
+                self.loc2dmet = loc2dmet	#similar to MO		[:,:Norb_in_imp]	
+                self.OccNum = OccNum
+                print ("SV IMP_energy: ", IMP_energy)
+            elif ( self.method == 'RHF' ):
+                import pyscf_rhf
+                assert( Nelec_in_imp % 2 == 0 )
+                DMguessRHF = self.ints.dmet_init_guess_rhf( loc2dmet, Norb_in_imp, Nelec_in_imp//2, numImpOrbs, chempot_imp )
+                IMP_energy, IMP_1RDM = pyscf_rhf.solve( 0.0, dmetOEI, dmetFOCK, dmetTEI, Norb_in_imp, Nelec_in_imp, numImpOrbs, DMguessRHF, self.CC_E_TYPE, chempot_imp )
+            
+            # ShreyaVerma Adding NEVPT2 related lines
+            if self.nevpt2_roots is not None:
+                e_CAS, e_CASCI_NEVPT2 = E_casscf
+                self.ss_CASCI = e_CASCI_NEVPT2[:,0]
+                e_CASCI = e_CASCI_NEVPT2[:,1]
+                e_NEVPT2 = e_CASCI_NEVPT2[:,2]
+                self.energy += e_CAS
+                print ("SV self.energy = ", self.energy)
+                #print ("SV e_CASCI_NEVPT2: ", e_CASCI_NEVPT2)
+                #print ("SV energies check: ",e_CAS, e_NEVPT2)
+                self.e_casci_tot = np.asarray(e_CASCI)
+                self.e_nept2_tot = np.asarray(e_NEVPT2)
+                
+            # Done adding NEVPT2
+            else:
+                self.energy += IMP_energy
+                print ("SV self.energy = ", self.energy)
+
+            E_frag.append(IMP_energy)
             self.imp_1RDM.append( IMP_1RDM )
             if ( self.doDET == True ) and ( self.doDET_NO == True ):
                 RDMeigenvals, RDMeigenvecs = np.linalg.eigh( IMP_1RDM[ :numImpOrbs, :numImpOrbs ] )
@@ -267,13 +437,41 @@ class dmet:
             self.NOrotation = self.constructNOrotation()
         
         Nelectrons = 0.0
+        Nefrag = []
         for counter in range( maxiter ):
             Nelectrons += np.trace( self.imp_1RDM[counter][ :self.imp_size[counter], :self.imp_size[counter] ] )
+            Nefrag.append(np.trace( self.imp_1RDM[counter][ :self.imp_size[counter], :self.imp_size[counter] ] ))
+            print("SV Nelectrons: ", Nelectrons)
+            print("SV Nefrag: ", Nefrag)
+			
         if ( self.TransInv == True ):
             Nelectrons = Nelectrons * len( self.impClust )
             self.energy = self.energy * len( self.impClust )
             remainingOrbs[:] = 0
-            
+        
+        #HungPham		
+        print('Fragment energies:',E_frag)
+        print('Fragment electrons:',Nefrag)
+        E1 = self.energy	
+        print('DEBUG Energy before adding up envi contribution:',E1)
+        #SA-CASSCF when full-emb is used:
+        if (self.state_average_ is not None) and (self.method == 'SA-CASPDFT' ):
+            print ("SV self.energy = ", self.energy)
+            for i, e in enumerate(self.energy):
+                print ("      State %d weight %7.5f: E = %12.8f" % (i, self.state_average_[i], e+self.ints.const()))
+
+
+        #NEVPT2 when full-emb is used:
+        if self.nevpt2_roots is not None:
+            print ("NEVPT2 energies for the selected states:")
+            for i, e_nevpt2 in enumerate(self.e_nept2_tot):
+                E_nevpt2_total = e_nevpt2+self.ints.const()
+                print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], self.e_casci_tot[i], E_nevpt2_total, self.ss_CASCI[i]))
+#            for i, e_casci in enumerate(self.e_casci_tot):
+#                E_casci_total = e_casci + self.ints.const()
+#                print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], E_casci_total, E_nevpt2_total, self.ss_CASCI[i]))
+
+
         # When an incomplete impurity tiling is used for the Hamiltonian, self.energy should be augmented with the remaining HF part
         if ( np.sum( remainingOrbs ) != 0 ):
         
@@ -285,11 +483,35 @@ class dmet:
                                                                          = einsum( core1RDM_loc, OEI ) + 0.5 * einsum( core1RDM_loc, JK )
                                                                          = 0.5 * einsum( core1RDM_loc, OEI + FOCK )
                 '''
-                assert( maxiter == 1 )
-                transfo = np.eye( self.Norb, dtype=float )
+                print ("SV remainingOrbs = ", remainingOrbs)
+                assert( maxiter == 1 )		
+                print("-----NOTE: CASCI or Single embedding is used-----")				
+                transfo = np.eye( self.Norb, dtype=float ) #SV generate an Id matrix
                 totalOEI  = self.ints.dmet_oei(  transfo, self.Norb )
+                #print("SV totalOEI: ", totalOEI)
                 totalFOCK = self.ints.dmet_fock( transfo, self.Norb, core1RDM_loc )
-                self.energy += 0.5 * np.einsum( 'ij,ij->', core1RDM_loc, totalOEI + totalFOCK )
+                core_energy = np.einsum( 'ij,ij->', core1RDM_loc, totalOEI + totalFOCK )
+                print ("Core energy = ", core_energy, self.ints.const())
+                
+                print ("SV self.energy: ", self.energy)
+                if (self.state_average_ is not None) and (self.method == 'SA-CASPDFT' ):
+                    for i, e in enumerate(self.energy):
+                        print ("      State %d weight %7.5f: E = %12.8f" % (i, self.state_average_[i], e+(0.5*core_energy)+self.ints.const()))
+
+                if (self.state_specific_ is not None):
+                    print ("      State %d state_specific_id %7.5f: E = %12.8f" % (self.state_specific_ , self.state_specific_, self.energy+(0.5*core_energy)+self.ints.const()))
+
+                if self.nevpt2_roots is not None:
+                    print ("NEVPT2 energies for the selected states check:") #Energy is without the nuclear component which will be cancelled on calculating excitation energies, I could have even not included the core_energy because that is also a constant added to energy of each state
+                    self.E_nevpt2_gs = self.e_nept2_tot[0]+(0.5*core_energy)+self.ints.const()
+                    print ("Core energy = " ,0.5*core_energy)
+                    for i, e_nevpt2 in enumerate(self.e_nept2_tot):
+                        E_nevpt2_total = e_nevpt2+(0.5*core_energy)+self.ints.const()
+                        print ("      State %d: E(CASCI) = %12.8f   E(NEVPT2) = %12.8f   <S^2> = %8.6f" % (self.nevpt2_roots[i], self.e_casci_tot[i], E_nevpt2_total, self.ss_CASCI[i]))
+
+
+                else:
+                    self.energy += 0.5 * core_energy
                 Nelectrons = np.trace( self.imp_1RDM[ 0 ] ) + np.trace( core1RDM_loc ) # Because full active space is used to compute the energy
             else:
                 #transfo = np.eye( self.Norb, dtype=float )
@@ -299,12 +521,14 @@ class dmet:
                 #         totalOEI[remainingOrbs==1,:] + totalFOCK[remainingOrbs==1,:] )
                 #Nelectrons += np.trace( (OneRDM[remainingOrbs==1,:])[:,remainingOrbs==1] )
 
+                print("Does it come here?")
+
                 assert (np.array_equal(self.ints.active, np.ones([self.ints.mol.nao_nr()], dtype=int)))
 
                 from pyscf import scf
                 from types import MethodType
                 mol_ = self.ints.mol
-                mf_  = scf.RHF(mol_)
+                mf_  = scf.RHF(mol_)#.density_fit()
 
                 impOrbs = remainingOrbs==1
                 xorb = np.dot(mf_.get_ovlp(), self.ints.ao2loc)
@@ -336,8 +560,11 @@ class dmet:
 
             remainingOrbs[ remainingOrbs==1 ] -= 1
         assert( np.all( remainingOrbs == 0 ) )
-            
+		
+        print('Energy decomposition for debug:',E1, self.energy-E1, self.energy) #HP: for debug
+        print('Nuclear potential:',self.ints.const()) 		
         self.energy += self.ints.const()
+#        print ("Decomposition of DMET energy: ", E1, 0.5 * np.einsum( 'ij,ij->', core1RDM_loc, totalOEI + totalFOCK), self.ints.const())
         return Nelectrons
         
     def constructNOrotation( self ):
@@ -365,6 +592,7 @@ class dmet:
     def alt_costfunction( self, newumatflat ):
 
         newumatsquare_loc = self.flat2square( newumatflat )
+        print ("***** Entering alt_costfunction *****")
         OneRDM_loc = self.helper.construct1RDM_loc( self.doSCF, newumatsquare_loc )
 
         errors    = self.rdm_differences_bis( newumatflat )
@@ -535,8 +763,8 @@ class dmet:
             umatbis[cnt] += stepsize
             costbis = self.costfunction( umatbis )
             gradientbis[ cnt ] = ( costbis - cost_reference ) / stepsize
-        print "   Norm( gradient difference ) =", np.linalg.norm( gradient - gradientbis )
-        print "   Norm( gradient )            =", np.linalg.norm( gradient )
+        print ("   Norm( gradient difference ) =", np.linalg.norm( gradient - gradientbis ))
+        print ("   Norm( gradient )            =", np.linalg.norm( gradient ))
         
     def hessian_eigenvalues( self, umatflat ):
     
@@ -553,7 +781,7 @@ class dmet:
         idx = eigvals.argsort()
         eigvals = eigvals[ idx ]
         eigvecs = eigvecs[ :, idx ]
-        print "Hessian eigenvalues =", eigvals
+        print ("Hessian eigenvalues =", eigvals)
         #print "Hessian 1st eigenvector =",eigvecs[:,0]
         #print "Hessian 2nd eigenvector =",eigvecs[:,1]
         
@@ -565,7 +793,7 @@ class dmet:
         umatsquare[ self.mask ] = umatflat
         if ( self.TransInv == True ):
             size = self.imp_size[ 0 ]
-            for it in range( 1, self.Norb / size ):
+            for it in range( 1, self.Norb // size ):
                 umatsquare[ it*size:(it+1)*size, it*size:(it+1)*size ] = umatsquare[ 0:size, 0:size ]
                 
         '''if True:
@@ -584,26 +812,28 @@ class dmet:
         if ( self.NOrotation != None ):
             umatsquare_bis = np.dot( np.dot( self.NOrotation.T, umatsquare_bis ), self.NOrotation )
         umatflat = umatsquare_bis[ self.mask ]
+        print ("SV umatflat: ",umatflat)
         return umatflat
         
     def numeleccostfunction( self, chempot_imp ):
         
         Nelec_dmet   = self.doexact( chempot_imp )
         Nelec_target = self.ints.Nelec
-        print "      (chemical potential , number of electrons) = (", chempot_imp, "," , Nelec_dmet ,")"
+        print ("      (chemical potential , number of electrons) = (", chempot_imp, "," , Nelec_dmet ,")")
         return Nelec_dmet - Nelec_target
 
     def doselfconsistent( self ):
-    
+        print ("***** Entering self-consistent *****")
+
         iteration = 0
         u_diff = 1.0
         convergence_threshold = 1e-5
-        print "RHF energy =", self.ints.fullEhf
+        print ("RHF energy =", self.ints.fullEhf)
         
         while ( u_diff > convergence_threshold ):
         
             iteration += 1
-            print "DMET iteration", iteration
+            print ("DMET iteration", iteration)
             umat_old = np.array( self.umat, copy=True )
             rdm_old = self.transform_ed_1rdm() # At the very first iteration, this matrix will be zero
             
@@ -612,12 +842,30 @@ class dmet:
             if (( self.method == 'CC' ) and ( self.CC_E_TYPE == 'CASCI' )):
                 self.mu_imp = 0.0
                 self.doexact( self.mu_imp )
+            elif (( self.method == 'CASSCF' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )
+            elif (( self.method == 'CASPDFT' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )
+            elif (( self.method == 'SA-CASPDFT' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )
+            elif (( self.method == 'SS-CASPDFT' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )
+            elif (( self.method == 'CASCI-PDFT' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )
+            elif (( self.method == 'RHF' ) and ( self.CC_E_TYPE == 'CASCI' )):
+                self.mu_imp = 0.0
+                self.doexact( self.mu_imp )				
             else:
                 self.mu_imp = optimize.newton( self.numeleccostfunction, self.mu_imp )
-                print "   Chemical potential =", self.mu_imp
+                print ("   Chemical potential =", self.mu_imp)
             stop_ed = time.time()
             self.time_ed += ( stop_ed - start_ed )
-            print "   Energy =", self.energy
+            print ("   Energy =", self.energy)
             # self.verify_gradient( self.square2flat( self.umat ) ) # Only works for self.doSCF == False!!
             if ( self.SCmethod != 'NONE' and not(self.altcostfunc) ):
                 self.hessian_eigenvalues( self.square2flat( self.umat ) )
@@ -635,9 +883,9 @@ class dmet:
                 self.umat = self.flat2square( result.x )
             self.umat = self.umat - np.eye( self.umat.shape[ 0 ] ) * np.average( np.diag( self.umat ) ) # Remove arbitrary chemical potential shifts
             if ( self.altcostfunc ):
-                print "   Cost function after convergence =", self.alt_costfunction( self.square2flat( self.umat ) )
+                print ("   Cost function after convergence =", self.alt_costfunction( self.square2flat( self.umat ) ))
             else:
-                print "   Cost function after convergence =", self.costfunction( self.square2flat( self.umat ) )
+                print ("   Cost function after convergence =", self.costfunction( self.square2flat( self.umat ) ))
             stop_cf = time.time()
             self.time_cf += ( stop_cf - start_cf )
             
@@ -651,33 +899,33 @@ class dmet:
             u_diff   = np.linalg.norm( umat_old - self.umat )
             rdm_diff = np.linalg.norm( rdm_old - self.transform_ed_1rdm() )
             self.umat = self.relaxation * umat_old + ( 1.0 - self.relaxation ) * self.umat
-            print "   2-norm of difference old and new u-mat =", u_diff
-            print "   2-norm of difference old and new 1-RDM =", rdm_diff
-            print "******************************************************"
+            print ("   2-norm of difference old and new u-mat =", u_diff)
+            print ("   2-norm of difference old and new 1-RDM =", rdm_diff)
+            print ("******************************************************")
             
             if ( self.SCmethod == 'NONE' ):
                 u_diff = 0.1 * convergence_threshold # Do only 1 iteration
         
-        print "Time cf func =", self.time_func
-        print "Time cf grad =", self.time_grad
-        print "Time dmet ed =", self.time_ed
-        print "Time dmet cf =", self.time_cf
+        print ("Time cf func =", self.time_func)
+        print ("Time cf grad =", self.time_grad)
+        print ("Time dmet ed =", self.time_ed)
+        print ("Time dmet cf =", self.time_cf)
         
         return self.energy
         
     def print_umat( self ):
     
-        print "The u-matrix ="
+        print ("The u-matrix =")
         squarejumper = 0
         for localsize in self.imp_size: # self.imp_size has length 1 if self.TransInv
-            print self.umat[ squarejumper:squarejumper+localsize , squarejumper:squarejumper+localsize ]
+            #print (self.umat[ squarejumper:squarejumper+localsize , squarejumper:squarejumper+localsize ])
             squarejumper += localsize
     
     def print_1rdm( self ):
     
-        print "The ED 1-RDM of the impurities ( + baths ) ="
+        #print ("The ED 1-RDM of the impurities ( + baths ) =")
         for count in range( len( self.imp_size ) ): # self.imp_size has length 1 if self.TransInv
-            print self.imp_1RDM[ count ]
+            print (self.imp_1RDM[ count ])
             
     def transform_ed_1rdm( self ):
     

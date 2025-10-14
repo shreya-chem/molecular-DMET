@@ -18,10 +18,11 @@
 '''
 
 import qcdmet_paths
-from pyscf import gto, scf, ao2mo, tools, future
-from pyscf.future import lo
-from pyscf.future.lo import nao, orth
-from pyscf.tools import molden, localizer
+from pyscf import gto, scf, ao2mo, tools, lo
+#from pyscf import lo
+from pyscf.lo import nao, orth
+from pyscf.tools import molden
+#from pyscf.tools import localizer
 import rhf
 import iao_helper
 import numpy as np
@@ -34,18 +35,23 @@ class localintegrals:
         
         # Information on the full HF problem
         self.mol        = the_mf.mol
-        self.fullEhf    = the_mf.hf_energy
+        self.fullEhf    = the_mf.e_tot
         self.fullDMao   = np.dot(np.dot( the_mf.mo_coeff, np.diag( the_mf.mo_occ )), the_mf.mo_coeff.T )
         self.fullJKao   = scf.hf.get_veff( self.mol, self.fullDMao, 0, 0, 1 ) #Last 3 numbers: dm_last, vhf_last, hermi
         self.fullFOCKao = self.mol.intor('cint1e_kin_sph') + self.mol.intor('cint1e_nuc_sph') + self.fullJKao
+        self.the_mf = the_mf
         
         # Active space information
         self._which   = localizationtype
         self.active   = np.zeros( [ self.mol.nao_nr() ], dtype=int )
         self.active[ active_orbs ] = 1
+        print("SV active_orbs: ", active_orbs)
+        print("SV active[active_orbs]: ", self.active[active_orbs])
         self.Norbs    = np.sum( self.active ) # Number of active space orbitals
+        print("SV self.Norbs: ", self.Norbs)
         self.Nelec    = int(np.rint( self.mol.nelectron - np.sum( the_mf.mo_occ[ self.active==0 ] ))) # Total number of electrons minus frozen part
-        
+        print("SV self.Nelec: ", self.Nelec)
+
         # Localize the orbitals
         if (( self._which == 'meta_lowdin' ) or ( self._which == 'boys' )):
             if ( self._which == 'meta_lowdin' ):
@@ -55,14 +61,15 @@ class localintegrals:
             if ( self.Norbs == self.mol.nao_nr() ): # If you want the full active, do meta-Lowdin
                 nao.AOSHELL[4] = ['1s0p0d0f', '2s1p0d0f'] # redefine the valence shell for Be
                 self.ao2loc = orth.orth_ao( self.mol, 'meta_lowdin' )
+                #print ("SV ao2loc for meta_lowdin: ", self.ao2loc)
                 if ( ao_rotation != None ):
                     self.ao2loc = np.dot( self.ao2loc, ao_rotation.T )
-            if ( self._which == 'boys' ):
-                old_verbose = self.mol.verbose
-                self.mol.verbose = 5
-                loc = localizer.localizer( self.mol, self.ao2loc, self._which, use_full_hessian )
-                self.mol.verbose = old_verbose
-                self.ao2loc = loc.optimize( threshold=localization_threshold )
+           #SV if ( self._which == 'boys' ):
+           #SV     old_verbose = self.mol.verbose
+           #SV     self.mol.verbose = 5
+           #SV     loc = localizer.localizer( self.mol, self.ao2loc, self._which, use_full_hessian )
+           #SV     self.mol.verbose = old_verbose
+           #SV     self.ao2loc = loc.optimize( threshold=localization_threshold )
             self.TI_OK = False # Check yourself if OK, then overwrite
         if ( self._which == 'lowdin' ):
             assert( self.Norbs == self.mol.nao_nr() ) # Full active space required
@@ -90,6 +97,7 @@ class localintegrals:
         # Active space OEI and ERI
         self.activeCONST = self.mol.energy_nuc() + np.einsum( 'ij,ij->', self.frozenOEIao - 0.5*self.frozenJKao, self.frozenDMao )
         self.activeOEI   = np.dot( np.dot( self.ao2loc.T, self.frozenOEIao ), self.ao2loc )
+        #print ("SV activeOEI: ", self.activeOEI)
         self.activeFOCK  = np.dot( np.dot( self.ao2loc.T, self.fullFOCKao  ), self.ao2loc )
         if ( self.Norbs <= 150 ):
             self.ERIinMEM  = True
@@ -124,10 +132,10 @@ class localintegrals:
             DMloc = rhf.solve_JK( self.activeOEI, self.mol, self.ao2loc, DMguess, numPairs )
         newFOCKloc = self.loc_rhf_fock_bis( DMloc )
         newRHFener = self.activeCONST + 0.5 * np.einsum( 'ij,ij->', DMloc, self.activeOEI + newFOCKloc )
-        print "2-norm difference of RDM(self.activeFOCK) and RDM(self.active{OEI,ERI})  =", np.linalg.norm( DMguess - DMloc )
-        print "2-norm difference of self.activeFOCK and FOCK(RDM(self.active{OEI,ERI})) =", np.linalg.norm( self.activeFOCK - newFOCKloc )
-        print "RHF energy of mean-field input           =", self.fullEhf
-        print "RHF energy based on self.active{OEI,ERI} =", newRHFener
+        print ("2-norm difference of RDM(self.activeFOCK) and RDM(self.active{OEI,ERI})  =", np.linalg.norm( DMguess - DMloc ))
+        print ("2-norm difference of self.activeFOCK and FOCK(RDM(self.active{OEI,ERI})) =", np.linalg.norm( self.activeFOCK - newFOCKloc ))
+        print ("RHF energy of mean-field input           =", self.fullEhf)
+        print ("RHF energy based on self.active{OEI,ERI} =", newRHFener)
         
     def const( self ):
     
@@ -142,7 +150,7 @@ class localintegrals:
         return self.activeFOCK
         
     def loc_rhf_fock_bis( self, DMloc ):
-    
+    #SV construct fock in local basis
         if ( self.ERIinMEM == False ):
             DM_ao = np.dot( np.dot( self.ao2loc, DMloc ), self.ao2loc.T )
             JK_ao = scf.hf.get_veff( self.mol, DM_ao, 0, 0, 1 ) #Last 3 numbers: dm_last, vhf_last, hermi
@@ -153,9 +161,9 @@ class localintegrals:
         return FOCKloc
 
     def loc_tei( self ):
-    
+    #SV ERI in local basis
         if ( self.ERIinMEM == False ):
-            print "localintegrals::loc_tei : ERI of the localized orbitals are not stored in memory."
+            print ("localintegrals::loc_tei : ERI of the localized orbitals are not stored in memory.")
         assert ( self.ERIinMEM == True )
         return self.activeERI
         
@@ -167,8 +175,10 @@ class localintegrals:
     def dmet_fock( self, loc2dmet, numActive, coreDMloc ):
     
         FOCKdmet = np.dot( np.dot( loc2dmet[:,:numActive].T, self.loc_rhf_fock_bis( coreDMloc ) ), loc2dmet[:,:numActive] )
+        #print("SV FOCKdmet: ", FOCKdmet)
         return FOCKdmet
         
+    #SV same as the function on line 303 by Pham localbasis.py
     def dmet_init_guess_rhf( self, loc2dmet, numActive, numPairs, Nimp, chempot_imp ):
     
         Fock_small = np.dot( np.dot( loc2dmet[:,:numActive].T, self.activeFOCK ), loc2dmet[:,:numActive] )
@@ -177,7 +187,7 @@ class localintegrals:
                 Fock_small[ orb, orb ] -= chempot_imp
         eigvals, eigvecs = np.linalg.eigh( Fock_small )
         eigvecs = eigvecs[ :, eigvals.argsort() ]
-        DMguess = 2 * np.dot( eigvecs[ :, :numPairs ], eigvecs[ :, :numPairs ].T )
+        DMguess = 2 * np.dot( eigvecs[ :, :int(numPairs) ], eigvecs[ :, :int(numPairs) ].T )
         return DMguess
         
     def dmet_tei( self, loc2dmet, numAct ):
@@ -188,5 +198,15 @@ class localintegrals:
         else:
             TEIdmet = ao2mo.incore.full(ao2mo.restore(8, self.activeERI, self.Norbs), loc2dmet[:,:numAct], compact=False).reshape(numAct, numAct, numAct, numAct)
         return TEIdmet
+
+    def get_ao2dmet(self, loc2dmet, numAct):
+        ao2dmet = np.dot(self.ao2loc, loc2dmet)
+        #print ("SV localintegrals numAct= ", numAct)
+        ao2dmet_active = np.dot(self.ao2loc, loc2dmet[:,:numAct])
+        #print ("SV ao2dmet, ao2mdet_act: ", ao2dmet, ao2dmet_active)
+        return ao2dmet, ao2dmet_active
         
-        
+    def get_OneRDMfull_dmet (self, loc2dmet, numAct):
+        OneRDM_full_dmet = np.dot(np.dot (loc2dmet,OneRDM_full_loc), loc2dmet.T)
+        #print ("SV OneRDM_full_dmet: ", OneRDM_full_dmet)
+        return OneRDM_full_dmet

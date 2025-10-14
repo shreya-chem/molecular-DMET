@@ -21,7 +21,7 @@ import localintegrals
 import rhf
 import numpy as np
 import ctypes
-lib_qcdmet = ctypes.CDLL('../lib/libqcdmet.so')
+lib_qcdmet = ctypes.CDLL('/project/lgagliardi/shreyav/apps/qcdmet/QC-DMET/lib/libqcdmet.so')
 
 class qcdmethelper:
 
@@ -29,10 +29,11 @@ class qcdmethelper:
     
         self.locints = theLocalIntegrals
         assert( self.locints.Nelec % 2 == 0 )
-        self.numPairs = self.locints.Nelec / 2
+        self.numPairs = self.locints.Nelec // 2
+        print("SV self.numPairs: ", self.numPairs)
         self.altcf = altcf
         self.minFunc = None
-
+        
         if self.altcf:
             assert (minFunc == 'OEI' or minFunc == 'FOCK_INIT')
             self.minFunc = minFunc
@@ -73,12 +74,15 @@ class qcdmethelper:
             OEI = self.locints.loc_rhf_fock() + umat_loc
         else:
             OEI   = self.locints.loc_rhf_fock() + umat_loc
+        print("SV OEI from localintegrals (in local basis): ", OEI)
         DMloc = self.construct1RDM_base( OEI, self.numPairs )
         if ( doSCF == True ):
             if ( self.locints.ERIinMEM == True ):
                 DMloc = rhf.solve_ERI( self.locints.loc_oei() + umat_loc, self.locints.loc_tei(), DMloc, self.numPairs )
+                print("SV here")
             else:
                 DMloc = rhf.solve_JK( self.locints.loc_oei() + umat_loc, self.locints.mol, self.locints.ao2loc, DMloc, self.numPairs )
+                print("SV not here")
         return DMloc
     
     def construct1RDM_response( self, doSCF, umat_loc, NOrotation ):
@@ -101,7 +105,7 @@ class qcdmethelper:
         
         lib_qcdmet.rhf_response( ctypes.c_int( self.locints.Norbs ),
                                  ctypes.c_int( self.Nterms ),
-                                 ctypes.c_int( self.numPairs ),
+                                 ctypes.c_int( int(self.numPairs) ),
                                  self.H1start.ctypes.data_as( ctypes.c_void_p ),
                                  self.H1row.ctypes.data_as( ctypes.c_void_p ),
                                  self.H1col.ctypes.data_as( ctypes.c_void_p ),
@@ -115,39 +119,48 @@ class qcdmethelper:
     
         eigenvals, eigenvecs = np.linalg.eigh( OEI ) # Does not guarantee sorted eigenvectors!
         idx = eigenvals.argsort()
-        eigenvals = eigenvals[idx]
-        eigenvecs = eigenvecs[:,idx]
-        OneDM = 2 * np.dot( eigenvecs[:,:myNumPairs] , eigenvecs[:,:myNumPairs].T )
+        eigenvals = eigenvals[idx] # sorted eigenvalues of OEI
+        eigenvecs = eigenvecs[:,idx] # all rows for idx columns
+        print ("SV eigenvecs: ", eigenvecs)
+        OneDM = 2 * np.dot( eigenvecs[:,:int(myNumPairs)] , eigenvecs[:,:int(myNumPairs)].T )
         #print "SP gap =", eigenvals[myNumPairs] - eigenvals[myNumPairs-1]
         return OneDM
         
     def constructbath( self, OneDM, impurityOrbs, numBathOrbs, threshold=1e-13 ):
     
-        embeddingOrbs = 1 - impurityOrbs
+        embeddingOrbs = 1 - impurityOrbs # orbitals except the ones in fragment will be constituting embedding orbs
+        print ("SV embeddingOrbs: ", embeddingOrbs)
+        print ("SV threshold = ", threshold)
         embeddingOrbs = np.matrix( embeddingOrbs )
+        print ("SV embeddingOrbs: ", embeddingOrbs)
         if (embeddingOrbs.shape[0] > 1):
             embeddingOrbs = embeddingOrbs.T # Now certainly row-like matrix (shape = 1 x len(vector))
-        isEmbedding = np.dot( embeddingOrbs.T , embeddingOrbs ) == 1
-        numEmbedOrbs = np.sum( embeddingOrbs )
+        isEmbedding = np.dot( embeddingOrbs.T , embeddingOrbs ) == 1 # matrix with orbs as embedding will be true
+        numEmbedOrbs = np.sum( embeddingOrbs ) # all orbitals except fragment = num of env
+        print ("SV numEmbedOrbs: ", numEmbedOrbs)
+        print ("SV OneDM[isEmbedding]: ", OneDM[isEmbedding])
         embedding1RDM = np.reshape( OneDM[ isEmbedding ], ( numEmbedOrbs , numEmbedOrbs ) )
-
+        print ("SV embedding1RDM: ", embedding1RDM)
         numImpOrbs   = np.sum( impurityOrbs )
         numTotalOrbs = len( impurityOrbs )
         
         eigenvals, eigenvecs = np.linalg.eigh( embedding1RDM )
         idx = np.maximum( -eigenvals, eigenvals - 2.0 ).argsort() # Occupation numbers closest to 1 come first
+        print ("SV idx and eigenvals: ",idx, eigenvals)
         tokeep = np.sum( -np.maximum( -eigenvals, eigenvals - 2.0 )[idx] > threshold )
+        print ("SV tokeep: ", tokeep, "and numBathOrbs: ",numBathOrbs)
         if ( tokeep < numBathOrbs ):
-            print "DMET::constructbath : Throwing out", numBathOrbs - tokeep, "orbitals which are within", threshold, "of 0 or 2."
+            print ("DMET::constructbath : Throwing out", numBathOrbs - tokeep, "orbitals which are within", threshold, "of 0 or 2.")# SV throw away those orbitals whose occupations are within 10^-13 of 0 or 2: ??
         numBathOrbs = min(np.sum( tokeep ), numBathOrbs)
         eigenvals = eigenvals[idx]
         eigenvecs = eigenvecs[:,idx]
-        pureEnvironEigVals = -eigenvals[numBathOrbs:]
+        pureEnvironEigVals = -eigenvals[numBathOrbs:] # SV remaining after removing impurity (earlier) and embedding (now) eigenvalues: this should constitute the pure environment
         pureEnvironEigVecs = eigenvecs[:,numBathOrbs:]
         idx = pureEnvironEigVals.argsort()
         eigenvecs[:,numBathOrbs:] = pureEnvironEigVecs[:,idx]
         pureEnvironEigVals = -pureEnvironEigVals[idx]
-        coreOccupations = np.hstack(( np.zeros([ numImpOrbs + numBathOrbs ]), pureEnvironEigVals ))
+        coreOccupations = np.hstack(( np.zeros([ numImpOrbs + numBathOrbs ]), pureEnvironEigVals ))# SV create a 0 occ frag+bath and the eigenvalues thrown out from bath will constitute the env
+        print ("SV coreOccupations (its length is n cGTOs): ",coreOccupations)
     
         for counter in range(0, numImpOrbs):
             eigenvecs = np.insert(eigenvecs, counter, 0.0, axis=1) #Stack columns with zeros in the beginning
@@ -158,6 +171,7 @@ class qcdmethelper:
                 eigenvecs[counter2, counter] = 1.0
                 counter += 1
         assert( counter == numImpOrbs )
+        print("SV eigenvecs: ",eigenvecs)
     
         # Orthonormality is guaranteed due to (1) stacking with zeros and (2) orthonormality eigenvecs for symmetric matrix
         assert( np.linalg.norm( np.dot(eigenvecs.T, eigenvecs) - np.identity(numTotalOrbs) ) < 1e-12 )
